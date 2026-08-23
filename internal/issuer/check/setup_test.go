@@ -34,7 +34,7 @@ import (
 	internalapi "github.com/cert-manager/cert-manager/internal/apis/certmanager"
 	internalv1 "github.com/cert-manager/cert-manager/internal/apis/certmanager/v1"
 	"github.com/cert-manager/cert-manager/internal/apis/certmanager/validation"
-	vaultinternal "github.com/cert-manager/cert-manager/internal/vault"
+	vaultinternal "github.com/cert-manager/vault-issuer/internal/vault"
 	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	cmfake "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned/fake"

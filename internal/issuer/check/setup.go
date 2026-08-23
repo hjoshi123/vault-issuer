@@ -22,7 +22,7 @@ import (
 
 	"k8s.io/klog/v2"
 
-	vaultinternal "github.com/cert-manager/cert-manager/internal/vault"
+	vaultinternal "github.com/cert-manager/vault-issuer/internal/vault"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"

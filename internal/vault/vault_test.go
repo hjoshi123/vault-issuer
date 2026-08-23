@@ -41,7 +41,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientcorev1 "k8s.io/client-go/listers/core/v1"
 
-	vaultfake "github.com/cert-manager/cert-manager/internal/vault/fake"
+	vaultfake "github.com/cert-manager/vault-issuer/internal/vault/fake"
 	cmapiv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	"github.com/cert-manager/cert-manager/pkg/util/pki"

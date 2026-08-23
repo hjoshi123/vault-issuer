@@ -28,7 +28,7 @@ import (
 	"k8s.io/client-go/tools/record"
 
 	internalinformers "github.com/cert-manager/cert-manager/internal/informers"
-	internalvault "github.com/cert-manager/cert-manager/internal/vault"
+	internalvault "github.com/cert-manager/vault-issuer/internal/vault"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"

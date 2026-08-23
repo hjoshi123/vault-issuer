@@ -18,10 +18,11 @@ package vault
 
 import (
 	internalinformers "github.com/cert-manager/cert-manager/internal/informers"
-	vaultinternal "github.com/cert-manager/cert-manager/internal/vault"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	"github.com/cert-manager/cert-manager/pkg/controller"
 	"github.com/cert-manager/cert-manager/pkg/issuer"
+
+	vaultinternal "github.com/cert-manager/vault-issuer/internal/vault"
 )
 
 // Vault Issuer for the certificate authority of Vault
@@ -43,9 +44,4 @@ func NewVault(ctx *controller.Context) (issuer.Interface, error) {
 		secretsLister: secretsLister,
 		createTokenFn: func(ns string) vaultinternal.CreateToken { return ctx.Client.CoreV1().ServiceAccounts(ns).CreateToken },
 	}, nil
-}
-
-// Register this Issuer with the issuer factory
-func init() {
-	issuer.RegisterIssuer(apiutil.IssuerVault, NewVault)
 }

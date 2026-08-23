@@ -22,7 +22,7 @@ import (
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 
 	internalinformers "github.com/cert-manager/cert-manager/internal/informers"
-	vaultinternal "github.com/cert-manager/cert-manager/internal/vault"
+	vaultinternal "github.com/cert-manager/vault-issuer/internal/vault"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"

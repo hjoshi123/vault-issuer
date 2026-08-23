@@ -27,8 +27,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 
 	internalinformers "github.com/cert-manager/cert-manager/internal/informers"
-	internalvault "github.com/cert-manager/cert-manager/internal/vault"
-	fakevault "github.com/cert-manager/cert-manager/internal/vault/fake"
+	internalvault "github.com/cert-manager/vault-issuer/internal/vault"
+	fakevault "github.com/cert-manager/vault-issuer/internal/vault/fake"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	"github.com/cert-manager/cert-manager/pkg/apis/certmanager"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
