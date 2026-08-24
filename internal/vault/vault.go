@@ -35,25 +35,25 @@ import (
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
-	vault "github.com/hashicorp/vault/api"
-	"github.com/hashicorp/vault/sdk/helper/certutil"
-	authv1 "k8s.io/api/authentication/v1"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	internalinformers "github.com/cert-manager/cert-manager/internal/informers"
 	v1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	logf "github.com/cert-manager/cert-manager/pkg/logs"
 	cmerrors "github.com/cert-manager/cert-manager/pkg/util/errors"
 	"github.com/cert-manager/cert-manager/pkg/util/pki"
+	vault "github.com/hashicorp/vault/api"
+	"github.com/hashicorp/vault/sdk/helper/certutil"
+	authv1 "k8s.io/api/authentication/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var _ Interface = &Vault{}
 
 // ClientBuilder is a function type that returns a new Interface.
 // Can be used in tests to create a mock signer of Vault certificate requests.
-type ClientBuilder func(ctx context.Context, namespace string, _ func(ns string) CreateToken, _ internalinformers.SecretLister, _ v1.GenericIssuer, canUseAmbientCredentials bool) (Interface, error)
+type ClientBuilder func(ctx context.Context, namespace string, _ func(ns string) CreateToken, _ client.Reader, _ v1.GenericIssuer, canUseAmbientCredentials bool) (Interface, error)
 
 // Interface implements various high level functionality related to connecting
 // with a Vault server, verifying its status and signing certificate request for
@@ -88,7 +88,7 @@ type CreateToken func(ctx context.Context, saName string, req *authv1.TokenReque
 // Vault client.
 type Vault struct {
 	createToken              CreateToken // Uses the same namespace as below.
-	secretsLister            internalinformers.SecretLister
+	secretsLister            client.Reader
 	issuer                   v1.GenericIssuer
 	namespace                string
 	canUseAmbientCredentials bool
@@ -115,16 +115,16 @@ type Vault struct {
 // secrets lister.
 // Returned errors may be network failures and should be considered for
 // retrying.
-func New(ctx context.Context, namespace string, createTokenFn func(ns string) CreateToken, secretsLister internalinformers.SecretLister, issuer v1.GenericIssuer, canUseAmbientCredentials bool) (Interface, error) {
+func New(ctx context.Context, namespace string, createTokenFn func(ns string) CreateToken, secretsGetter client.Reader, issuer v1.GenericIssuer, canUseAmbientCredentials bool) (Interface, error) {
 	v := &Vault{
 		createToken:              createTokenFn(namespace),
-		secretsLister:            secretsLister,
+		secretsLister:            secretsGetter,
 		namespace:                namespace,
 		issuer:                   issuer,
 		canUseAmbientCredentials: canUseAmbientCredentials,
 	}
 
-	cfg, err := v.newConfig()
+	cfg, err := v.newConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -212,7 +212,7 @@ func (v *Vault) setToken(ctx context.Context, client Client) error {
 
 	tokenRef := v.issuer.GetSpec().Vault.Auth.TokenSecretRef
 	if tokenRef != nil {
-		token, err := v.tokenRef(tokenRef.Name, v.namespace, tokenRef.Key)
+		token, err := v.tokenRef(ctx, tokenRef.Name, v.namespace, tokenRef.Key)
 		if err != nil {
 			return err
 		}
@@ -223,7 +223,7 @@ func (v *Vault) setToken(ctx context.Context, client Client) error {
 
 	appRole := v.issuer.GetSpec().Vault.Auth.AppRole
 	if appRole != nil {
-		token, err := v.requestTokenWithAppRoleRef(client, appRole)
+		token, err := v.requestTokenWithAppRoleRef(ctx, client, appRole)
 		if err != nil {
 			return err
 		}
@@ -234,7 +234,7 @@ func (v *Vault) setToken(ctx context.Context, client Client) error {
 
 	clientCert := v.issuer.GetSpec().Vault.Auth.ClientCertificate
 	if clientCert != nil {
-		token, err := v.requestTokenWithClientCertificate(client, clientCert)
+		token, err := v.requestTokenWithClientCertificate(ctx, client, clientCert)
 		if err != nil {
 			return err
 		}
@@ -266,11 +266,11 @@ func (v *Vault) setToken(ctx context.Context, client Client) error {
 	return cmerrors.NewInvalidData("error initializing Vault client: unable to load credentials. One of: tokenSecretRef, appRoleSecretRef, clientCertificate, Kubernetes, or AWS auth must be set")
 }
 
-func (v *Vault) newConfig() (*vault.Config, error) {
+func (v *Vault) newConfig(ctx context.Context) (*vault.Config, error) {
 	cfg := vault.DefaultConfig()
 	cfg.Address = v.issuer.GetSpec().Vault.Server
 
-	caBundle, err := v.caBundle()
+	caBundle, err := v.caBundle(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load vault CA bundle: %w", err)
 	}
@@ -285,7 +285,7 @@ func (v *Vault) newConfig() (*vault.Config, error) {
 		cfg.HttpClient.Transport.(*http.Transport).TLSClientConfig.RootCAs = caCertPool
 	}
 
-	clientCertificate, err := v.clientCertificate()
+	clientCertificate, err := v.clientCertificate(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load vault client certificate: %w", err)
 	}
@@ -307,7 +307,7 @@ func (v *Vault) newConfig() (*vault.Config, error) {
 // Assumes the in-line and Secret CA bundles are not both defined.
 // If the `key` of the Secret CA bundle is not defined, its value defaults to
 // `ca.crt`.
-func (v *Vault) caBundle() ([]byte, error) {
+func (v *Vault) caBundle(ctx context.Context) ([]byte, error) {
 	if len(v.issuer.GetSpec().Vault.CABundle) > 0 {
 		return v.issuer.GetSpec().Vault.CABundle, nil
 	}
@@ -317,7 +317,13 @@ func (v *Vault) caBundle() ([]byte, error) {
 		return nil, nil
 	}
 
-	secret, err := v.secretsLister.Secrets(v.namespace).Get(ref.Name)
+	secret := &corev1.Secret{}
+	secretNamespaceName := types.NamespacedName{
+		Namespace: v.namespace,
+		Name:      ref.Name,
+	}
+
+	err := v.secretsLister.Get(ctx, secretNamespaceName, secret)
 	if err != nil {
 		return nil, fmt.Errorf("could not access secret '%s/%s': %s", v.namespace, ref.Name, err)
 	}
@@ -339,18 +345,31 @@ func (v *Vault) caBundle() ([]byte, error) {
 
 // clientCertificate returns the Client Certificate for the Vault server.
 // Can be used in Vault client configs when the server requires mTLS.
-func (v *Vault) clientCertificate() (*tls.Certificate, error) {
+func (v *Vault) clientCertificate(ctx context.Context) (*tls.Certificate, error) {
 	refCert := v.issuer.GetSpec().Vault.ClientCertSecretRef
 	refPrivateKey := v.issuer.GetSpec().Vault.ClientKeySecretRef
 	if refCert == nil || refPrivateKey == nil {
 		return nil, nil
 	}
 
-	secretCert, err := v.secretsLister.Secrets(v.namespace).Get(refCert.Name)
+	secretCert := &corev1.Secret{}
+	secretNamespaceName := types.NamespacedName{
+		Namespace: v.namespace,
+		Name:      refCert.Name,
+	}
+
+	err := v.secretsLister.Get(ctx, secretNamespaceName, secretCert)
 	if err != nil {
 		return nil, fmt.Errorf("could not access Secret '%s/%s': %s", v.namespace, refCert.Name, err)
 	}
-	secretPrivateKey, err := v.secretsLister.Secrets(v.namespace).Get(refPrivateKey.Name)
+
+	secretPrivateKey := &corev1.Secret{}
+	secretNamespaceName = types.NamespacedName{
+		Namespace: v.namespace,
+		Name:      refPrivateKey.Name,
+	}
+
+	err = v.secretsLister.Get(ctx, secretNamespaceName, secretPrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("could not access Secret '%s/%s': %s", v.namespace, refPrivateKey.Name, err)
 	}
@@ -385,8 +404,14 @@ func (v *Vault) clientCertificate() (*tls.Certificate, error) {
 	return &cert, nil
 }
 
-func (v *Vault) tokenRef(name, namespace, key string) (string, error) {
-	secret, err := v.secretsLister.Secrets(namespace).Get(name)
+func (v *Vault) tokenRef(ctx context.Context, name, namespace, key string) (string, error) {
+	secret := &corev1.Secret{}
+	secretNamespaceName := types.NamespacedName{
+		Namespace: namespace,
+		Name:      name,
+	}
+
+	err := v.secretsLister.Get(ctx, secretNamespaceName, secret)
 	if err != nil {
 		return "", err
 	}
@@ -406,10 +431,16 @@ func (v *Vault) tokenRef(name, namespace, key string) (string, error) {
 	return token, nil
 }
 
-func (v *Vault) appRoleRef(appRole *v1.VaultAppRole) (roleId, secretId string, err error) {
+func (v *Vault) appRoleRef(ctx context.Context, appRole *v1.VaultAppRole) (roleId, secretId string, err error) {
 	roleId = strings.TrimSpace(appRole.RoleId)
 
-	secret, err := v.secretsLister.Secrets(v.namespace).Get(appRole.SecretRef.Name)
+	secret := &corev1.Secret{}
+	secretNamespaceName := types.NamespacedName{
+		Namespace: v.namespace,
+		Name:      appRole.SecretRef.Name,
+	}
+
+	err = v.secretsLister.Get(ctx, secretNamespaceName, secret)
 	if err != nil {
 		return "", "", err
 	}
@@ -427,8 +458,8 @@ func (v *Vault) appRoleRef(appRole *v1.VaultAppRole) (roleId, secretId string, e
 	return roleId, secretId, nil
 }
 
-func (v *Vault) requestTokenWithAppRoleRef(client Client, appRole *v1.VaultAppRole) (string, error) {
-	roleId, secretId, err := v.appRoleRef(appRole)
+func (v *Vault) requestTokenWithAppRoleRef(ctx context.Context, client Client, appRole *v1.VaultAppRole) (string, error) {
+	roleId, secretId, err := v.appRoleRef(ctx, appRole)
 	if err != nil {
 		return "", err
 	}
@@ -477,11 +508,17 @@ func (v *Vault) requestTokenWithAppRoleRef(client Client, appRole *v1.VaultAppRo
 	return token, nil
 }
 
-func (v *Vault) requestTokenWithClientCertificate(client Client, clientCertificateAuth *v1.VaultClientCertificateAuth) (string, error) {
+func (v *Vault) requestTokenWithClientCertificate(ctx context.Context, client Client, clientCertificateAuth *v1.VaultClientCertificateAuth) (string, error) {
 	// If secretName is set, load client certificate from Secret, otherwise assume that a
 	// fitting client certificate is loaded in the client already.
 	if len(clientCertificateAuth.SecretName) != 0 {
-		secret, err := v.secretsLister.Secrets(v.namespace).Get(clientCertificateAuth.SecretName)
+		secret := &corev1.Secret{}
+		secretNamespaceName := types.NamespacedName{
+			Namespace: v.namespace,
+			Name:      clientCertificateAuth.Name,
+		}
+
+		err := v.secretsLister.Get(ctx, secretNamespaceName, secret)
 		if err != nil {
 			return "", err
 		}
@@ -557,7 +594,13 @@ func (v *Vault) requestTokenWithKubernetesAuth(ctx context.Context, client Clien
 	var jwt string
 	switch {
 	case kubernetesAuth.SecretRef.Name != "":
-		secret, err := v.secretsLister.Secrets(v.namespace).Get(kubernetesAuth.SecretRef.Name)
+		secret := &corev1.Secret{}
+		secretNamespaceName := types.NamespacedName{
+			Namespace: v.namespace,
+			Name:      kubernetesAuth.SecretRef.Name,
+		}
+
+		err := v.secretsLister.Get(ctx, secretNamespaceName, secret)
 		if err != nil {
 			return "", err
 		}

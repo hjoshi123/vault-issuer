@@ -31,6 +31,11 @@ import (
 	"testing"
 	"time"
 
+	cmapiv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/pkg/util/pki"
+	"github.com/cert-manager/cert-manager/test/unit/gen"
+	"github.com/cert-manager/cert-manager/test/unit/listers"
 	vault "github.com/hashicorp/vault/api"
 	"github.com/hashicorp/vault/sdk/helper/certutil"
 	"github.com/hashicorp/vault/sdk/helper/jsonutil"
@@ -40,13 +45,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientcorev1 "k8s.io/client-go/listers/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	fakeCl "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	vaultfake "github.com/cert-manager/vault-issuer/internal/vault/fake"
-	cmapiv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
-	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
-	"github.com/cert-manager/cert-manager/pkg/util/pki"
-	"github.com/cert-manager/cert-manager/test/unit/gen"
-	"github.com/cert-manager/cert-manager/test/unit/listers"
 )
 
 const (
@@ -223,7 +226,7 @@ func generateCSR(t *testing.T, secretKey crypto.Signer) []byte {
 
 type testSignT struct {
 	issuer     *cmapiv1.Issuer
-	fakeLister *listers.FakeSecretLister
+	fakeLister client.Reader
 	fakeClient *vaultfake.FakeClient
 
 	csrPEM       []byte
@@ -300,7 +303,8 @@ func TestSign(t *testing.T) {
 			),
 			fakeClient: vaultfake.NewFakeClient().WithRawRequest(&vault.Response{
 				Response: &http.Response{
-					Body: io.NopCloser(bytes.NewReader(bundleData))},
+					Body: io.NopCloser(bytes.NewReader(bundleData)),
+				},
 			}, nil),
 			expectedErr:  nil,
 			expectedCert: testLeafCertificate + testIntermediateCa,
@@ -314,7 +318,8 @@ func TestSign(t *testing.T) {
 			),
 			fakeClient: vaultfake.NewFakeClient().WithRawRequest(&vault.Response{
 				Response: &http.Response{
-					Body: io.NopCloser(bytes.NewReader(rootBundleData))},
+					Body: io.NopCloser(bytes.NewReader(rootBundleData)),
+				},
 			}, nil),
 			expectedErr:  nil,
 			expectedCert: testLeafCertificate + testIntermediateCa,
@@ -328,7 +333,8 @@ func TestSign(t *testing.T) {
 			),
 			fakeClient: vaultfake.NewFakeClient().WithRawRequest(&vault.Response{
 				Response: &http.Response{
-					Body: io.NopCloser(bytes.NewReader(bundleData))},
+					Body: io.NopCloser(bytes.NewReader(bundleData)),
+				},
 			}, nil),
 			expectedErr:  nil,
 			expectedCert: testLeafCertificate + testIntermediateCa,
@@ -404,7 +410,6 @@ func TestExtractCertificatesFromVaultCertificateSecret(t *testing.T) {
 
 	for name, test := range tests {
 		cert, ca, err := extractCertificatesFromVaultCertificateSecret(test.secret)
-
 		if err != nil {
 			t.Errorf("%s: failed to extract certificate: %s", name, err)
 		}
@@ -441,7 +446,7 @@ func TestSetToken(t *testing.T) {
 
 		issuer                   cmapiv1.GenericIssuer
 		canUseAmbientCredentials bool
-		fakeLister               *listers.FakeSecretLister
+		fakeLister               client.Reader
 		mockCreateToken          func(t *testing.T) CreateToken
 
 		fakeClient *vaultfake.FakeClient
@@ -1036,7 +1041,7 @@ type testAppRoleRefT struct {
 
 	appRole *cmapiv1.VaultAppRole
 
-	fakeLister *listers.FakeSecretLister
+	fakeLister client.Reader
 }
 
 func TestAppRoleRef(t *testing.T) {
@@ -1049,9 +1054,11 @@ func TestAppRoleRef(t *testing.T) {
 	tests := map[string]testAppRoleRefT{
 		"failing to get secret should error": {
 			appRole: basicAppRoleRef,
-			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-				listers.SetFakeSecretNamespaceListerGet(nil, errSecretGet),
-			),
+			fakeLister: fakeCl.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
+				Get: func(ctx context.Context, client client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					return errSecretGet
+				},
+			}).Build(),
 			expectedRoleID:   "",
 			expectedSecretID: "",
 			expectedErr:      errSecretGet,
@@ -1067,14 +1074,11 @@ func TestAppRoleRef(t *testing.T) {
 					Key: "my-key",
 				},
 			},
-			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-				listers.SetFakeSecretNamespaceListerGet(
-					&corev1.Secret{
-						Data: map[string][]byte{
-							"foo": []byte("bar"),
-						},
-					}, nil),
-			),
+			fakeLister: fakeCl.NewClientBuilder().WithRuntimeObjects(&corev1.Secret{
+				Data: map[string][]byte{
+					"foo": []byte("bar"),
+				},
+			}).Build(),
 			expectedRoleID:   "",
 			expectedSecretID: "",
 			expectedErr:      errors.New(`no data for "my-key" in secret 'test-namespace/secret-name'`),
@@ -1090,15 +1094,12 @@ func TestAppRoleRef(t *testing.T) {
 					Key: "my-key",
 				},
 			},
-			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-				listers.SetFakeSecretNamespaceListerGet(
-					&corev1.Secret{
-						Data: map[string][]byte{
-							"foo":    []byte("bar"),
-							"my-key": []byte("    my-key-data   "),
-						},
-					}, nil),
-			),
+			fakeLister: fakeCl.NewClientBuilder().WithRuntimeObjects(&corev1.Secret{
+				Data: map[string][]byte{
+					"foo":    []byte("bar"),
+					"my-key": []byte("  my-key-data  "),
+				},
+			}).Build(),
 			expectedRoleID:   "my-role-id",
 			expectedSecretID: "my-key-data",
 			expectedErr:      nil,
@@ -1113,7 +1114,7 @@ func TestAppRoleRef(t *testing.T) {
 				issuer:        nil,
 			}
 
-			roleID, secretID, err := v.appRoleRef(test.appRole)
+			roleID, secretID, err := v.appRoleRef(t.Context(), test.appRole)
 			if ((test.expectedErr == nil) != (err == nil)) &&
 				test.expectedErr != nil &&
 				test.expectedErr.Error() != err.Error() {
@@ -1140,7 +1141,7 @@ type testTokenRefT struct {
 
 	key string
 
-	fakeLister *listers.FakeSecretLister
+	fakeLister client.Reader
 }
 
 func TestTokenRef(t *testing.T) {
@@ -1150,23 +1151,26 @@ func TestTokenRef(t *testing.T) {
 
 	tests := map[string]testTokenRefT{
 		"failing to get secret should error": {
-			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-				listers.SetFakeSecretNamespaceListerGet(nil, errSecretGet),
-			),
+			fakeLister: fakeCl.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
+				Get: func(ctx context.Context, client client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					return errSecretGet
+				},
+			}).Build(),
 			key:           "a-key",
 			expectedToken: "",
 			expectedErr:   errSecretGet,
 		},
 
 		"if no vault at key exists then error": {
-			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-				listers.SetFakeSecretNamespaceListerGet(
-					&corev1.Secret{
-						Data: map[string][]byte{
-							"foo": []byte("bar"),
-						},
-					}, nil),
-			),
+			fakeLister: fakeCl.NewClientBuilder().WithRuntimeObjects(&corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      testName,
+					Namespace: testNamespace,
+				},
+				Data: map[string][]byte{
+					"foo": []byte("bar"),
+				},
+			}).Build(),
 
 			key:           "a-key",
 			expectedToken: "",
@@ -1174,29 +1178,31 @@ func TestTokenRef(t *testing.T) {
 				testName, testNamespace),
 		},
 		"if value exists at key then return with whitespace trimmed": {
-			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-				listers.SetFakeSecretNamespaceListerGet(
-					&corev1.Secret{
-						Data: map[string][]byte{
-							"foo":   []byte("bar"),
-							"a-key": []byte(" my-token              "),
-						},
-					}, nil),
-			),
+			fakeLister: fakeCl.NewClientBuilder().WithRuntimeObjects(&corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      testName,
+					Namespace: testNamespace,
+				},
+				Data: map[string][]byte{
+					"foo":   []byte("bar"),
+					"a-key": []byte("my-token"),
+				},
+			}).Build(),
 
 			key:           "a-key",
 			expectedToken: "my-token",
 		},
 		"if no key is given then it should default to 'token'": {
-			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-				listers.SetFakeSecretNamespaceListerGet(
-					&corev1.Secret{
-						Data: map[string][]byte{
-							"foo":   []byte("bar"),
-							"token": []byte(" my-token              "),
-						},
-					}, nil),
-			),
+			fakeLister: fakeCl.NewClientBuilder().WithRuntimeObjects(&corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      testName,
+					Namespace: testNamespace,
+				},
+				Data: map[string][]byte{
+					"foo":   []byte("bar"),
+					"token": []byte("my-token"),
+				},
+			}).Build(),
 
 			key:           "",
 			expectedToken: "my-token",
@@ -1211,7 +1217,7 @@ func TestTokenRef(t *testing.T) {
 				issuer:        nil,
 			}
 
-			token, err := v.tokenRef("test-name", "test-namespace", test.key)
+			token, err := v.tokenRef(t.Context(), "test-name", "test-namespace", test.key)
 			if ((test.expectedErr == nil) != (err == nil)) &&
 				test.expectedErr != nil &&
 				test.expectedErr.Error() != err.Error() {
@@ -1232,7 +1238,7 @@ type testNewConfigT struct {
 	issuer      *cmapiv1.Issuer
 	checkFunc   func(cfg *vault.Config, err error) error
 
-	fakeLister      *listers.FakeSecretLister
+	fakeLister      client.Reader
 	fakeCreateToken func(t *testing.T) CreateToken
 }
 
@@ -1246,7 +1252,8 @@ func TestNewConfig(t *testing.T) {
 							return &corev1.Secret{
 								Data: map[string][]byte{
 									key: []byte(cert),
-								}}, nil
+								},
+							}, nil
 						}
 						return nil, errors.New("unexpected secret name or namespace passed to FakeSecretLister")
 					}
@@ -1265,7 +1272,8 @@ func TestNewConfig(t *testing.T) {
 									caKey:      []byte(caCert),
 									clientKey:  []byte(clientCert),
 									privateKey: []byte(privateKeyCert),
-								}}, nil
+								},
+							}, nil
 						}
 						return nil, errors.New("unexpected secret name or namespace passed to FakeSecretLister")
 					}
@@ -1401,7 +1409,8 @@ func TestNewConfig(t *testing.T) {
 								Name: "my-sa",
 							},
 						},
-					}})),
+					},
+				})),
 			fakeCreateToken: func(t *testing.T) CreateToken {
 				return func(_ context.Context, saName string, req *authv1.TokenRequest, opts metav1.CreateOptions) (*authv1.TokenRequest, error) {
 					assert.Equal(t, "test-namespace", req.Namespace)
@@ -1511,7 +1520,7 @@ func TestNewConfig(t *testing.T) {
 				issuer:        test.issuer,
 			}
 
-			cfg, err := v.newConfig()
+			cfg, err := v.newConfig(t.Context())
 			if test.expectedErr != nil && err != nil && test.expectedErr.Error() != err.Error() {
 				t.Errorf("unexpected error, exp=%v got=%v", test.expectedErr, err)
 			}
@@ -1529,7 +1538,7 @@ type requestTokenWithAppRoleRefT struct {
 	client  Client
 	appRole *cmapiv1.VaultAppRole
 
-	fakeLister *listers.FakeSecretLister
+	fakeLister client.Reader
 
 	expectedToken string
 	expectedErr   error
@@ -1546,14 +1555,15 @@ func TestRequestTokenWithAppRoleRef(t *testing.T) {
 		},
 	}
 
-	basicSecretLister := listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-		listers.SetFakeSecretNamespaceListerGet(
-			&corev1.Secret{
-				Data: map[string][]byte{
-					"my-key": []byte("my-key-data"),
-				},
-			}, nil),
-	)
+	basicSecretLister := fakeCl.NewClientBuilder().WithRuntimeObjects(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "secret1",
+			Namespace: "k8s-ns1",
+		},
+		Data: map[string][]byte{
+			"my-key": []byte("my-key-data"),
+		},
+	}).Build()
 
 	tests := map[string]requestTokenWithAppRoleRefT{
 		"a secret reference that does not exist should error": {
@@ -1636,7 +1646,7 @@ func TestRequestTokenWithAppRoleRef(t *testing.T) {
 				),
 			}
 
-			token, err := v.requestTokenWithAppRoleRef(test.client, test.appRole)
+			token, err := v.requestTokenWithAppRoleRef(t.Context(), test.client, test.appRole)
 			if ((test.expectedErr == nil) != (err == nil)) &&
 				test.expectedErr != nil &&
 				test.expectedErr.Error() != err.Error() {
@@ -1672,20 +1682,23 @@ func TestNewWithVaultNamespaces(t *testing.T) {
 		},
 	}
 
+	fakeReader := fakeCl.NewClientBuilder().WithRuntimeObjects(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "secret1",
+			Namespace: "k8s-ns1",
+		},
+		Data: map[string][]byte{
+			"key1": []byte("not-used"),
+		},
+	}).Build()
+
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			c, err := New(
 				t.Context(),
 				"k8s-ns1",
 				func(ns string) CreateToken { return nil },
-				listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-					listers.SetFakeSecretNamespaceListerGet(
-						&corev1.Secret{
-							Data: map[string][]byte{
-								"key1": []byte("not-used"),
-							},
-						}, nil),
-				),
+				fakeReader,
 				&cmapiv1.Issuer{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "issuer1",
@@ -1720,7 +1733,6 @@ func TestNewWithVaultNamespaces(t *testing.T) {
 // TestIsVaultInitiatedAndUnsealedIntegration demonstrates that it interacts only with the
 // sys/health endpoint and that it supplies the Vault token but not a Vault namespace header.
 func TestIsVaultInitiatedAndUnsealedIntegration(t *testing.T) {
-
 	const vaultToken = "token1"
 
 	mux := http.NewServeMux()
@@ -1731,18 +1743,21 @@ func TestIsVaultInitiatedAndUnsealedIntegration(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
+	fakeReader := fakeCl.NewClientBuilder().WithRuntimeObjects(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "secret1",
+			Namespace: "k8s-ns1",
+		},
+		Data: map[string][]byte{
+			"key1": []byte(vaultToken),
+		},
+	}).Build()
+
 	v, err := New(
 		t.Context(),
 		"k8s-ns1",
 		func(ns string) CreateToken { return nil },
-		listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-			listers.SetFakeSecretNamespaceListerGet(
-				&corev1.Secret{
-					Data: map[string][]byte{
-						"key1": []byte(vaultToken),
-					},
-				}, nil),
-		),
+		fakeReader,
 		&cmapiv1.Issuer{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "issuer1",
@@ -1797,18 +1812,21 @@ func TestSignIntegration(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
+	fakeReader := fakeCl.NewClientBuilder().WithRuntimeObjects(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "secret1",
+			Namespace: "k8s-ns1",
+		},
+		Data: map[string][]byte{
+			"key1": []byte(vaultToken),
+		},
+	}).Build()
+
 	v, err := New(
 		t.Context(),
 		"k8s-ns1",
 		func(ns string) CreateToken { return nil },
-		listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-			listers.SetFakeSecretNamespaceListerGet(
-				&corev1.Secret{
-					Data: map[string][]byte{
-						"key1": []byte(vaultToken),
-					},
-				}, nil),
-		),
+		fakeReader,
 		&cmapiv1.Issuer{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "issuer1",
