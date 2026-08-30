@@ -22,9 +22,11 @@ import (
 	"crypto"
 	"crypto/rsa"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -35,7 +37,6 @@ import (
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	"github.com/cert-manager/cert-manager/pkg/util/pki"
 	"github.com/cert-manager/cert-manager/test/unit/gen"
-	"github.com/cert-manager/cert-manager/test/unit/listers"
 	vault "github.com/hashicorp/vault/api"
 	"github.com/hashicorp/vault/sdk/helper/certutil"
 	"github.com/hashicorp/vault/sdk/helper/jsonutil"
@@ -43,8 +44,8 @@ import (
 	"github.com/stretchr/testify/require"
 	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	clientcorev1 "k8s.io/client-go/listers/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeCl "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -204,6 +205,77 @@ beE8ft41eEFS8AnSJd5hE9Ym
 `
 )
 
+// testChain is a certificate chain generated for a test: a self-signed root, an
+// intermediate signed by that root, and two leaves signed by the intermediate.
+type testChain struct {
+	rootPEM         string
+	intermediatePEM string
+	// leafPEM carries the key that was passed to newTestChain.
+	leafPEM string
+	// otherKeyLeafPEM carries a different key, which is what Vault returns
+	// when the path points at the "issue" endpoint.
+	otherKeyLeafPEM string
+}
+
+// newTestChain builds a root, an intermediate, and two leaves. Vault returns a
+// chain that cert-manager verifies link by link, so a leaf has to be signed by
+// a CA that the bundle also carries. A self-signed leaf fails to parse before
+// any key check runs.
+func newTestChain(t *testing.T, leafKey crypto.Signer) testChain {
+	t.Helper()
+
+	caTemplate := func(serial int64, cn string) *x509.Certificate {
+		return &x509.Certificate{
+			SerialNumber:          big.NewInt(serial),
+			Subject:               pkix.Name{CommonName: cn},
+			NotBefore:             time.Now().Add(-time.Hour),
+			NotAfter:              time.Now().Add(24 * time.Hour),
+			IsCA:                  true,
+			BasicConstraintsValid: true,
+			KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		}
+	}
+	leafTemplate := func(serial int64, cn string) *x509.Certificate {
+		return &x509.Certificate{
+			SerialNumber: big.NewInt(serial),
+			Subject:      pkix.Name{CommonName: cn},
+			NotBefore:    time.Now().Add(-time.Hour),
+			NotAfter:     time.Now().Add(24 * time.Hour),
+			KeyUsage:     x509.KeyUsageDigitalSignature,
+		}
+	}
+
+	rootKey := generateRSAPrivateKey(t)
+	rootTmpl := caTemplate(1, "test-root")
+	rootPEM, rootCert, err := pki.SignCertificate(rootTmpl, rootTmpl, rootKey.Public(), rootKey)
+	if err != nil {
+		t.Fatalf("failed to sign root certificate: %v", err)
+	}
+
+	intKey := generateRSAPrivateKey(t)
+	intPEM, intCert, err := pki.SignCertificate(caTemplate(2, "test-intermediate"), rootCert, intKey.Public(), rootKey)
+	if err != nil {
+		t.Fatalf("failed to sign intermediate certificate: %v", err)
+	}
+
+	leafPEM, _, err := pki.SignCertificate(leafTemplate(3, "test"), intCert, leafKey.Public(), intKey)
+	if err != nil {
+		t.Fatalf("failed to sign leaf certificate: %v", err)
+	}
+
+	otherLeafPEM, _, err := pki.SignCertificate(leafTemplate(4, "test"), intCert, generateRSAPrivateKey(t).Public(), intKey)
+	if err != nil {
+		t.Fatalf("failed to sign leaf certificate with a different key: %v", err)
+	}
+
+	return testChain{
+		rootPEM:         string(rootPEM),
+		intermediatePEM: string(intPEM),
+		leafPEM:         string(leafPEM),
+		otherKeyLeafPEM: string(otherLeafPEM),
+	}
+}
+
 func generateRSAPrivateKey(t *testing.T) *rsa.PrivateKey {
 	pk, err := pki.GenerateRSAPrivateKey(2048)
 	if err != nil {
@@ -224,6 +296,69 @@ func generateCSR(t *testing.T, secretKey crypto.Signer) []byte {
 	return csr
 }
 
+// emptySecretReader returns a client.Reader that holds no Secrets at all. Any
+// Get against it fails with a NotFound error.
+func emptySecretReader() client.Reader {
+	return fakeCl.NewClientBuilder().Build()
+}
+
+// fakeSecretReader returns a client.Reader that answers every Secret Get with
+// the given secret, or with the given error.
+//
+// It ignores the requested name and namespace, mirroring cert-manager's
+// FakeSecretLister which these tests were originally written against. Use
+// fakeSecretReaderFor when a test needs the lookup key to be checked.
+func fakeSecretReader(secret *corev1.Secret, getErr error) client.Reader {
+	return fakeCl.NewClientBuilder().
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(_ context.Context, _ client.WithWatch, key client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
+				if getErr != nil {
+					return getErr
+				}
+
+				out, ok := obj.(*corev1.Secret)
+				if !ok {
+					return fmt.Errorf("unexpected object type %T passed to Get", obj)
+				}
+
+				if secret == nil {
+					return apierrors.NewNotFound(corev1.Resource("secrets"), key.Name)
+				}
+
+				secret.DeepCopyInto(out)
+
+				return nil
+			},
+		}).
+		Build()
+}
+
+// fakeSecretReaderFor returns a client.Reader that answers a Get for
+// namespace/name with a Secret containing data, and errors for any other key.
+func fakeSecretReaderFor(namespace, name string, data map[string][]byte) client.Reader {
+	return fakeCl.NewClientBuilder().
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(_ context.Context, _ client.WithWatch, key client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
+				if key.Namespace != namespace || key.Name != name {
+					return fmt.Errorf("unexpected secret name or namespace passed to the fake client: %s", key)
+				}
+
+				out, ok := obj.(*corev1.Secret)
+				if !ok {
+					return fmt.Errorf("unexpected object type %T passed to Get", obj)
+				}
+
+				(&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+					Data:       data,
+				}).DeepCopyInto(out)
+
+				return nil
+			},
+		}).
+		Build()
+}
+
 type testSignT struct {
 	issuer     *cmapiv1.Issuer
 	fakeLister client.Reader
@@ -235,10 +370,10 @@ type testSignT struct {
 	expectedCA   string
 }
 
-func signedCertificateSecret(issuingCaPEM string, caPEM ...string) *certutil.Secret {
+func signedCertificateSecret(certPEM, issuingCaPEM string, caPEM ...string) *certutil.Secret {
 	secret := &certutil.Secret{
 		Data: map[string]any{
-			"certificate": testLeafCertificate,
+			"certificate": certPEM,
 		},
 	}
 
@@ -256,8 +391,8 @@ func signedCertificateSecret(issuingCaPEM string, caPEM ...string) *certutil.Sec
 	return secret
 }
 
-func bundlePEM(issuingCaPEM string, caPEM ...string) ([]byte, error) {
-	secret := signedCertificateSecret(issuingCaPEM, caPEM...)
+func bundlePEM(certPEM, issuingCaPEM string, caPEM ...string) ([]byte, error) {
+	secret := signedCertificateSecret(certPEM, issuingCaPEM, caPEM...)
 	return jsonutil.EncodeJSON(&secret)
 }
 
@@ -265,22 +400,34 @@ func TestSign(t *testing.T) {
 	privatekey := generateRSAPrivateKey(t)
 	csrPEM := generateCSR(t, privatekey)
 
-	bundleData, err := bundlePEM(testIntermediateCa)
+	// The leaf carries the CSR key and is signed by the intermediate, so the
+	// chain verifies and the key check passes.
+	chain := newTestChain(t, privatekey)
+
+	bundleData, err := bundlePEM(chain.leafPEM, chain.intermediatePEM)
 	if err != nil {
 		t.Errorf("failed to encode bundle for testing: %s", err)
 		t.FailNow()
 	}
 
-	rootBundleData, err := bundlePEM(testIntermediateCa, testRootCa)
+	rootBundleData, err := bundlePEM(chain.leafPEM, chain.intermediatePEM, chain.rootPEM)
 	if err != nil {
 		t.Errorf("failed to encode root bundle for testing: %s", err)
+		t.FailNow()
+	}
+
+	// The chain still verifies here, but the leaf carries a different key,
+	// which is what Vault returns from the "issue" endpoint.
+	mismatchBundleData, err := bundlePEM(chain.otherKeyLeafPEM, chain.intermediatePEM)
+	if err != nil {
+		t.Errorf("failed to encode mismatch bundle for testing: %s", err)
 		t.FailNow()
 	}
 
 	tests := map[string]testSignT{
 		"a garbage csr should return err": {
 			csrPEM:       []byte("a bad csr"),
-			expectedErr:  errors.New("failed to decode CSR for signing: error decoding certificate request PEM block"),
+			expectedErr:  errors.New("failed to decode CSR for signing: error decoding certificate request PEM block: no PEM data was found in given input"),
 			expectedCert: "",
 			expectedCA:   "",
 		},
@@ -307,8 +454,8 @@ func TestSign(t *testing.T) {
 				},
 			}, nil),
 			expectedErr:  nil,
-			expectedCert: testLeafCertificate + testIntermediateCa,
-			expectedCA:   testIntermediateCa,
+			expectedCert: chain.leafPEM + chain.intermediatePEM,
+			expectedCA:   chain.intermediatePEM,
 		},
 
 		"a good csr and good response with a root should return a certificate without the root in the chain but with the root as the CA": {
@@ -322,8 +469,8 @@ func TestSign(t *testing.T) {
 				},
 			}, nil),
 			expectedErr:  nil,
-			expectedCert: testLeafCertificate + testIntermediateCa,
-			expectedCA:   testRootCa,
+			expectedCert: chain.leafPEM + chain.intermediatePEM,
+			expectedCA:   chain.rootPEM,
 		},
 
 		"vault issuer with namespace specified": {
@@ -337,49 +484,54 @@ func TestSign(t *testing.T) {
 				},
 			}, nil),
 			expectedErr:  nil,
-			expectedCert: testLeafCertificate + testIntermediateCa,
-			expectedCA:   testIntermediateCa,
+			expectedCert: chain.leafPEM + chain.intermediatePEM,
+			expectedCA:   chain.intermediatePEM,
+		},
+
+		"should return an error when Vault returns a certificate with a different public key than the CSR": {
+			csrPEM: csrPEM,
+			issuer: gen.Issuer("vault-issuer",
+				gen.SetIssuerVault(cmapiv1.VaultIssuer{}),
+			),
+			fakeClient: vaultfake.NewFakeClient().WithRawRequest(&vault.Response{
+				Response: &http.Response{
+					Body: io.NopCloser(bytes.NewReader(mismatchBundleData)),
+				},
+			}, nil),
+			expectedErr:  errors.New("public key in the certificate returned by Vault does not match the public key in the CSR"),
+			expectedCert: "",
+			expectedCA:   "",
 		},
 	}
 
 	for name, test := range tests {
-		v := &Vault{
-			namespace:     "test-namespace",
-			secretsLister: test.fakeLister,
-			issuer:        test.issuer,
-			client:        test.fakeClient,
-		}
-
-		cert, ca, err := v.Sign(test.csrPEM, time.Minute)
-		if ((test.expectedErr == nil) != (err == nil)) &&
-			test.expectedErr != nil &&
-			test.expectedErr.Error() != err.Error() {
-			t.Errorf("%s: unexpected error, exp=%v got=%v",
-				name, test.expectedErr, err)
-		}
-
-		if (test.expectedCert == "" || string(cert) == "") && test.expectedCert != string(cert) {
-			t.Errorf("unexpected certificate in response bundle, exp=%s got=%s",
-				test.expectedCert, cert)
-		} else if test.expectedCert != string(cert) {
-			parsedBundle, err := certutil.ParsePEMBundle(string(cert))
-			if err != nil {
-				t.Errorf("%s: failed to decode bundle: %s", name, err)
+		t.Run(name, func(t *testing.T) {
+			v := &Vault{
+				namespace:     "test-namespace",
+				secretsLister: test.fakeLister,
+				issuer:        test.issuer,
+				client:        test.fakeClient,
 			}
-			bundle, err := parsedBundle.ToCertBundle()
-			if err != nil {
-				t.Errorf("%s: failed to convert bundle: %s", name, err)
-			}
-			if test.expectedCert != bundle.Certificate {
-				t.Errorf("%s: unexpected certificate in response bundle, exp=%s got=%s",
-					name, test.expectedCert, cert)
-			}
-		}
 
-		if test.expectedCA != string(ca) {
-			t.Errorf("unexpected ca in response bundle, exp=%s got=%s; %s",
-				test.expectedCA, ca, name)
-		}
+			cert, ca, err := v.Sign(test.csrPEM, time.Minute)
+			if test.expectedErr != nil {
+				if err == nil {
+					t.Errorf("expected error but got none, expected: %v", test.expectedErr)
+				} else if !strings.Contains(err.Error(), test.expectedErr.Error()) {
+					t.Errorf("unexpected error, exp=%v got=%v", test.expectedErr, err)
+				}
+			} else if err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+
+			if string(cert) != test.expectedCert {
+				t.Errorf("unexpected certificate in response bundle, exp=%s got=%s", test.expectedCert, cert)
+			}
+
+			if test.expectedCA != string(ca) {
+				t.Errorf("unexpected ca in response bundle, exp=%q got=%q", test.expectedCA, ca)
+			}
+		})
 	}
 }
 
@@ -389,27 +541,39 @@ type testExtractCertificatesFromVaultCertT struct {
 	expectedCA   string
 }
 
+func TestExtractCertificatesFromVaultCertificateSecretWithoutCertificate(t *testing.T) {
+	// A Vault response that carries a CA but no certificate parses without
+	// error, so the leaf must not reach the caller as nil.
+	secret := &certutil.Secret{Data: map[string]any{
+		"issuing_ca": testIntermediateCa,
+	}}
+
+	_, _, leaf, err := extractCertificatesFromVaultCertificateSecret(secret)
+	require.Error(t, err)
+	require.Nil(t, leaf)
+}
+
 func TestExtractCertificatesFromVaultCertificateSecret(t *testing.T) {
 	tests := map[string]testExtractCertificatesFromVaultCertT{
 		"when a Vault engine is a root CA": {
-			secret:       signedCertificateSecret(testIntermediateCa),
+			secret:       signedCertificateSecret(testLeafCertificate, testIntermediateCa),
 			expectedCert: testLeafCertificate + testIntermediateCa,
 			expectedCA:   testIntermediateCa,
 		},
 		"when a Vault engine is an intermediate CA, and its parent is a root CA": {
-			secret:       signedCertificateSecret(testIntermediateCa, testRootCa),
+			secret:       signedCertificateSecret(testLeafCertificate, testIntermediateCa, testRootCa),
 			expectedCert: testLeafCertificate + testIntermediateCa,
 			expectedCA:   testRootCa,
 		},
 		"when a Vault engine is an intermediate CA, and its parent is a intermediate CA": {
-			secret:       signedCertificateSecret(testIntermediateCa, testIntermediateCa, testRootCa),
+			secret:       signedCertificateSecret(testLeafCertificate, testIntermediateCa, testIntermediateCa, testRootCa),
 			expectedCert: testLeafCertificate + testIntermediateCa,
 			expectedCA:   testRootCa,
 		},
 	}
 
 	for name, test := range tests {
-		cert, ca, err := extractCertificatesFromVaultCertificateSecret(test.secret)
+		cert, ca, _, err := extractCertificatesFromVaultCertificateSecret(test.secret)
 		if err != nil {
 			t.Errorf("%s: failed to extract certificate: %s", name, err)
 		}
@@ -458,7 +622,7 @@ func TestSetToken(t *testing.T) {
 					Auth:     cmapiv1.VaultAuth{},
 				}),
 			),
-			fakeLister:    listers.FakeSecretListerFrom(listers.NewFakeSecretLister()),
+			fakeLister:    emptySecretReader(),
 			expectedToken: "",
 			expectedErr: errors.New(
 				"error initializing Vault client: unable to load credentials. One of: tokenSecretRef, appRoleSecretRef, clientCertificate, Kubernetes, or AWS auth must be set",
@@ -477,7 +641,7 @@ func TestSetToken(t *testing.T) {
 				}),
 			),
 			canUseAmbientCredentials: false,
-			fakeLister:               listers.FakeSecretListerFrom(listers.NewFakeSecretLister()),
+			fakeLister:               emptySecretReader(),
 			expectedToken:            "",
 			expectedErr: errors.New(
 				"while requesting a Vault token using the AWS auth: cannot authenticate to Vault using ambient AWS credentials: set auth.aws.serviceAccountRef, or enable ambient credentials via --issuer-ambient-credentials / --cluster-issuer-ambient-credentials",
@@ -497,9 +661,7 @@ func TestSetToken(t *testing.T) {
 					},
 				}),
 			),
-			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-				listers.SetFakeSecretNamespaceListerGet(nil, errors.New("secret does not exists")),
-			),
+			fakeLister:    fakeSecretReader(nil, errors.New("secret does not exists")),
 			expectedToken: "",
 			expectedErr:   errors.New("secret does not exists"),
 		},
@@ -518,9 +680,7 @@ func TestSetToken(t *testing.T) {
 					},
 				}),
 			),
-			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-				listers.SetFakeSecretNamespaceListerGet(tokenSecret, nil),
-			),
+			fakeLister: fakeSecretReader(tokenSecret, nil),
 
 			expectedToken: "my-secret-token",
 			expectedErr:   nil,
@@ -543,9 +703,7 @@ func TestSetToken(t *testing.T) {
 					},
 				}),
 			),
-			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-				listers.SetFakeSecretNamespaceListerGet(nil, errors.New("secret not found")),
-			),
+			fakeLister:    fakeSecretReader(nil, errors.New("secret not found")),
 			expectedToken: "",
 			expectedErr:   errors.New("secret not found"),
 		},
@@ -567,9 +725,7 @@ func TestSetToken(t *testing.T) {
 					},
 				}),
 			),
-			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-				listers.SetFakeSecretNamespaceListerGet(appRoleSecret, nil),
-			),
+			fakeLister: fakeSecretReader(appRoleSecret, nil),
 			fakeClient: vaultfake.NewFakeClient().WithRawRequest(&vault.Response{
 				Response: &http.Response{
 					Body: io.NopCloser(
@@ -593,9 +749,7 @@ func TestSetToken(t *testing.T) {
 					},
 				}),
 			),
-			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-				listers.SetFakeSecretNamespaceListerGet(nil, errors.New("secret does not exist")),
-			),
+			fakeLister:    fakeSecretReader(nil, errors.New("secret does not exist")),
 			fakeClient:    vaultfake.NewFakeClient(),
 			expectedToken: "",
 			expectedErr:   errors.New("secret does not exist"),
@@ -612,13 +766,11 @@ func TestSetToken(t *testing.T) {
 					},
 				}),
 			),
-			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-				listers.SetFakeSecretNamespaceListerGet(&corev1.Secret{
-					Data: map[string][]byte{
-						"tls.key": []byte(testLeafCertificate),
-					},
-				}, nil),
-			),
+			// Keyed on namespace/name so that a regression in which Secret the
+			// client certificate auth resolves would fail this test.
+			fakeLister: fakeSecretReaderFor("test-namespace", "secret-ref-name", map[string][]byte{
+				"tls.key": []byte(testLeafCertificate),
+			}),
 			fakeClient:    vaultfake.NewFakeClient(),
 			expectedToken: "",
 			expectedErr:   errors.New("no data for tls.crt in secret 'test-namespace/secret-ref-name'"),
@@ -635,13 +787,9 @@ func TestSetToken(t *testing.T) {
 					},
 				}),
 			),
-			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-				listers.SetFakeSecretNamespaceListerGet(&corev1.Secret{
-					Data: map[string][]byte{
-						"tls.crt": []byte(testLeafCertificate),
-					},
-				}, nil),
-			),
+			fakeLister: fakeSecretReaderFor("test-namespace", "secret-ref-name", map[string][]byte{
+				"tls.crt": []byte(testLeafCertificate),
+			}),
 			fakeClient:    vaultfake.NewFakeClient(),
 			expectedToken: "",
 			expectedErr:   errors.New("no data for tls.key in secret 'test-namespace/secret-ref-name'"),
@@ -685,11 +833,9 @@ func TestSetToken(t *testing.T) {
 					},
 				}),
 			),
-			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-				listers.SetFakeSecretNamespaceListerGet(nil, errors.New("secret does not exists")),
-			),
+			fakeLister:    fakeSecretReader(nil, errors.New("secret does not exists")),
 			expectedToken: "",
-			expectedErr:   errors.New("error reading Kubernetes service account token from secret-ref-name: secret does not exists"),
+			expectedErr:   errors.New("while requesting a Vault token using the Kubernetes auth: secret does not exists"),
 		},
 
 		"if kubernetes role auth set but reference secret doesn't contain data at key error": {
@@ -709,11 +855,9 @@ func TestSetToken(t *testing.T) {
 					},
 				}),
 			),
-			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-				listers.SetFakeSecretNamespaceListerGet(&corev1.Secret{}, nil),
-			),
+			fakeLister:    fakeSecretReader(&corev1.Secret{}, nil),
 			expectedToken: "",
-			expectedErr:   errors.New(`error reading Kubernetes service account token from secret-ref-name: no data for "my-kube-key" in secret 'test-namespace/secret-ref-name'`),
+			expectedErr:   errors.New(`while requesting a Vault token using the Kubernetes auth: no data for "my-kube-key" in secret 'test-namespace/secret-ref-name'`),
 		},
 
 		"if kubernetes role auth set but errors with a raw request should error": {
@@ -733,12 +877,10 @@ func TestSetToken(t *testing.T) {
 					},
 				}),
 			),
-			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-				listers.SetFakeSecretNamespaceListerGet(kubeAuthSecret, nil),
-			),
+			fakeLister:    fakeSecretReader(kubeAuthSecret, nil),
 			fakeClient:    vaultfake.NewFakeClient().WithRawRequest(nil, errors.New("raw request error")),
 			expectedToken: "",
-			expectedErr:   errors.New("error reading Kubernetes service account token from secret-ref-name: error calling Vault server: raw request error"),
+			expectedErr:   errors.New("while requesting a Vault token using the Kubernetes auth: error calling Vault server: raw request error"),
 		},
 
 		"foo": {
@@ -758,9 +900,7 @@ func TestSetToken(t *testing.T) {
 					},
 				}),
 			),
-			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-				listers.SetFakeSecretNamespaceListerGet(kubeAuthSecret, nil),
-			),
+			fakeLister: fakeSecretReader(kubeAuthSecret, nil),
 			fakeClient: vaultfake.NewFakeClient().WithRawRequest(&vault.Response{
 				Response: &http.Response{
 					Body: io.NopCloser(
@@ -796,9 +936,7 @@ func TestSetToken(t *testing.T) {
 					},
 				}),
 			),
-			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-				listers.SetFakeSecretNamespaceListerGet(tokenSecret, nil),
-			),
+			fakeLister:    fakeSecretReader(tokenSecret, nil),
 			expectedToken: "my-secret-token",
 			expectedErr:   nil,
 		},
@@ -991,9 +1129,8 @@ func TestSetToken(t *testing.T) {
 			}
 
 			err := v.setToken(t.Context(), test.fakeClient)
-			if ((test.expectedErr == nil) != (err == nil)) &&
-				test.expectedErr != nil &&
-				test.expectedErr.Error() != err.Error() {
+			if ((test.expectedErr == nil) != (err == nil)) ||
+				(test.expectedErr != nil && test.expectedErr.Error() != err.Error()) {
 				t.Errorf("unexpected error, exp=%v got=%v",
 					test.expectedErr, err)
 			}
@@ -1075,6 +1212,10 @@ func TestAppRoleRef(t *testing.T) {
 				},
 			},
 			fakeLister: fakeCl.NewClientBuilder().WithRuntimeObjects(&corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "secret-name",
+					Namespace: "test-namespace",
+				},
 				Data: map[string][]byte{
 					"foo": []byte("bar"),
 				},
@@ -1095,6 +1236,10 @@ func TestAppRoleRef(t *testing.T) {
 				},
 			},
 			fakeLister: fakeCl.NewClientBuilder().WithRuntimeObjects(&corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "secret-name",
+					Namespace: "test-namespace",
+				},
 				Data: map[string][]byte{
 					"foo":    []byte("bar"),
 					"my-key": []byte("  my-key-data  "),
@@ -1115,9 +1260,8 @@ func TestAppRoleRef(t *testing.T) {
 			}
 
 			roleID, secretID, err := v.appRoleRef(t.Context(), test.appRole)
-			if ((test.expectedErr == nil) != (err == nil)) &&
-				test.expectedErr != nil &&
-				test.expectedErr.Error() != err.Error() {
+			if ((test.expectedErr == nil) != (err == nil)) ||
+				(test.expectedErr != nil && test.expectedErr.Error() != err.Error()) {
 				t.Errorf("unexpected error, exp=%v got=%v",
 					test.expectedErr, err)
 			}
@@ -1218,9 +1362,8 @@ func TestTokenRef(t *testing.T) {
 			}
 
 			token, err := v.tokenRef(t.Context(), "test-name", "test-namespace", test.key)
-			if ((test.expectedErr == nil) != (err == nil)) &&
-				test.expectedErr != nil &&
-				test.expectedErr.Error() != err.Error() {
+			if ((test.expectedErr == nil) != (err == nil)) ||
+				(test.expectedErr != nil && test.expectedErr.Error() != err.Error()) {
 				t.Errorf("unexpected error, exp=%v got=%v",
 					test.expectedErr, err)
 			}
@@ -1243,42 +1386,16 @@ type testNewConfigT struct {
 }
 
 func TestNewConfig(t *testing.T) {
-	caBundleSecretRefFakeSecretLister := func(namespace, secret, key, cert string) *listers.FakeSecretLister {
-		return listers.FakeSecretListerFrom(listers.NewFakeSecretLister(), func(f *listers.FakeSecretLister) {
-			f.SecretsFn = func(listerNamespace string) clientcorev1.SecretNamespaceLister {
-				return listers.FakeSecretNamespaceListerFrom(listers.NewFakeSecretNamespaceLister(), func(fn *listers.FakeSecretNamespaceLister) {
-					fn.GetFn = func(name string) (*corev1.Secret, error) {
-						if name == secret && listerNamespace == namespace {
-							return &corev1.Secret{
-								Data: map[string][]byte{
-									key: []byte(cert),
-								},
-							}, nil
-						}
-						return nil, errors.New("unexpected secret name or namespace passed to FakeSecretLister")
-					}
-				})
-			}
+	caBundleSecretRefFakeSecretReader := func(namespace, secret, key, cert string) client.Reader {
+		return fakeSecretReaderFor(namespace, secret, map[string][]byte{
+			key: []byte(cert),
 		})
 	}
-	clientCertificateSecretRefFakeSecretLister := func(namespace, secret, caKey, caCert, clientKey, clientCert, privateKey, privateKeyCert string) *listers.FakeSecretLister {
-		return listers.FakeSecretListerFrom(listers.NewFakeSecretLister(), func(f *listers.FakeSecretLister) {
-			f.SecretsFn = func(listerNamespace string) clientcorev1.SecretNamespaceLister {
-				return listers.FakeSecretNamespaceListerFrom(listers.NewFakeSecretNamespaceLister(), func(fn *listers.FakeSecretNamespaceLister) {
-					fn.GetFn = func(name string) (*corev1.Secret, error) {
-						if name == secret && listerNamespace == namespace {
-							return &corev1.Secret{
-								Data: map[string][]byte{
-									caKey:      []byte(caCert),
-									clientKey:  []byte(clientCert),
-									privateKey: []byte(privateKeyCert),
-								},
-							}, nil
-						}
-						return nil, errors.New("unexpected secret name or namespace passed to FakeSecretLister")
-					}
-				})
-			}
+	clientCertificateSecretRefFakeSecretReader := func(namespace, secret, caKey, caCert, clientKey, clientCert, privateKey, privateKeyCert string) client.Reader {
+		return fakeSecretReaderFor(namespace, secret, map[string][]byte{
+			caKey:      []byte(caCert),
+			clientKey:  []byte(clientCert),
+			privateKey: []byte(privateKeyCert),
 		})
 	}
 	tests := map[string]testNewConfigT{
@@ -1351,7 +1468,7 @@ func TestNewConfig(t *testing.T) {
 
 				return nil
 			},
-			fakeLister: caBundleSecretRefFakeSecretLister("test-namespace", "bundle", "my-bundle.crt", testLeafCertificate),
+			fakeLister: caBundleSecretRefFakeSecretReader("test-namespace", "bundle", "my-bundle.crt", testLeafCertificate),
 		},
 		"a good bundle from a caBundleSecretRef with default key should be added to the config": {
 			issuer: gen.Issuer("vault-issuer",
@@ -1380,7 +1497,7 @@ func TestNewConfig(t *testing.T) {
 
 				return nil
 			},
-			fakeLister: caBundleSecretRefFakeSecretLister("test-namespace", "bundle", "ca.crt", testLeafCertificate),
+			fakeLister: caBundleSecretRefFakeSecretReader("test-namespace", "bundle", "ca.crt", testLeafCertificate),
 		},
 		"a bad bundle from a caBundleSecretRef should error": {
 			issuer: gen.Issuer("vault-issuer",
@@ -1395,7 +1512,7 @@ func TestNewConfig(t *testing.T) {
 				},
 				)),
 			expectedErr: errors.New("no Vault CA bundles loaded, check bundle contents"),
-			fakeLister:  caBundleSecretRefFakeSecretLister("test-namespace", "bundle", "my-bundle.crt", "not a valid certificate"),
+			fakeLister:  caBundleSecretRefFakeSecretReader("test-namespace", "bundle", "my-bundle.crt", "not a valid certificate"),
 		},
 		"the tokenCreate func should be called with the correct namespace": {
 			issuer: gen.Issuer("vault-issuer",
@@ -1461,7 +1578,7 @@ func TestNewConfig(t *testing.T) {
 
 				return nil
 			},
-			fakeLister: clientCertificateSecretRefFakeSecretLister("test-namespace", "bundle", "ca.crt", testLeafCertificate, "tls.crt", testClientCertificate, "tls.key", testClientCertificatePrivateKey),
+			fakeLister: clientCertificateSecretRefFakeSecretReader("test-namespace", "bundle", "ca.crt", testLeafCertificate, "tls.crt", testClientCertificate, "tls.key", testClientCertificatePrivateKey),
 		},
 		"a bad client certificate should error": {
 			issuer: gen.Issuer("vault-issuer",
@@ -1485,7 +1602,7 @@ func TestNewConfig(t *testing.T) {
 				},
 				)),
 			expectedErr: errors.New("failed to load vault client certificate: could not parse the TLS certificate from Secrets 'test-namespace/bundle'(cert) and 'test-namespace/bundle'(key): tls: failed to find any PEM data in certificate input"),
-			fakeLister:  clientCertificateSecretRefFakeSecretLister("test-namespace", "bundle", "ca.crt", testLeafCertificate, "tls.crt", "not a valid certificate", "tls.key", "not a valid certificate"),
+			fakeLister:  clientCertificateSecretRefFakeSecretReader("test-namespace", "bundle", "ca.crt", testLeafCertificate, "tls.crt", "not a valid certificate", "tls.key", "not a valid certificate"),
 		},
 		"if server name is set it should be added to the config": {
 			issuer: gen.Issuer("vault-issuer",
@@ -1555,10 +1672,12 @@ func TestRequestTokenWithAppRoleRef(t *testing.T) {
 		},
 	}
 
+	// The Vault under test resolves the AppRole secret in its own namespace,
+	// so this must match basicAppRoleRef and the "test-namespace" below.
 	basicSecretLister := fakeCl.NewClientBuilder().WithRuntimeObjects(&corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "secret1",
-			Namespace: "k8s-ns1",
+			Name:      "test-secret",
+			Namespace: "test-namespace",
 		},
 		Data: map[string][]byte{
 			"my-key": []byte("my-key-data"),
@@ -1568,9 +1687,11 @@ func TestRequestTokenWithAppRoleRef(t *testing.T) {
 	tests := map[string]requestTokenWithAppRoleRefT{
 		"a secret reference that does not exist should error": {
 			appRole: basicAppRoleRef,
-			fakeLister: listers.FakeSecretListerFrom(listers.NewFakeSecretLister(),
-				listers.SetFakeSecretNamespaceListerGet(nil, errors.New("secret not found")),
-			),
+			fakeLister: fakeCl.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
+				Get: func(ctx context.Context, client client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					return errors.New("secret not found")
+				},
+			}).Build(),
 
 			expectedToken: "",
 			expectedErr:   errors.New("secret not found"),
@@ -1647,9 +1768,8 @@ func TestRequestTokenWithAppRoleRef(t *testing.T) {
 			}
 
 			token, err := v.requestTokenWithAppRoleRef(t.Context(), test.client, test.appRole)
-			if ((test.expectedErr == nil) != (err == nil)) &&
-				test.expectedErr != nil &&
-				test.expectedErr.Error() != err.Error() {
+			if ((test.expectedErr == nil) != (err == nil)) ||
+				(test.expectedErr != nil && test.expectedErr.Error() != err.Error()) {
 				t.Errorf("unexpected error, exp=%v got=%v",
 					test.expectedErr, err)
 			}
@@ -1799,7 +1919,8 @@ func TestSignIntegration(t *testing.T) {
 	privatekey := generateRSAPrivateKey(t)
 	csrPEM := generateCSR(t, privatekey)
 
-	rootBundleData, err := bundlePEM(testIntermediateCa, testRootCa)
+	chain := newTestChain(t, privatekey)
+	rootBundleData, err := bundlePEM(chain.leafPEM, chain.intermediatePEM, chain.rootPEM)
 	require.NoError(t, err)
 
 	mux := http.NewServeMux()
