@@ -95,6 +95,9 @@ func (s *Signer) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
 
 		// Preserves the in-tree behaviour of populating the CertificateRequest's
 		// status.ca (and therefore the Secret's ca.crt).
+		//nolint:staticcheck // Deliberate: the in-tree Vault issuer populated
+		// status.ca, so leaving this off would silently empty ca.crt in every
+		// Secret on the next renewal.
 		SetCAOnCertificateRequest: true,
 
 		EventRecorder: mgr.GetEventRecorder(FieldOwner),

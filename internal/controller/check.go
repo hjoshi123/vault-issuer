@@ -29,11 +29,6 @@ import (
 )
 
 const (
-	successVaultVerified = "VaultVerified"
-	messageVaultVerified = "Vault verified"
-
-	errorVault = "VaultError"
-
 	messageVaultClientInitFailed             = "Failed to initialize Vault client"
 	messageVaultInitializedAndUnsealedFailed = "Failed to verify Vault is initialized and unsealed"
 	messageVaultConfigRequired               = "Vault config cannot be empty"

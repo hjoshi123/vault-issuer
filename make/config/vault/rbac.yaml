@@ -1,7 +1,12 @@
+# Vault's Kubernetes auth method validates ServiceAccount tokens by calling
+# TokenReview, which requires the system:auth-delegator role.
+#
+# {{NAMESPACE}} is replaced by the make target, so the default and the
+# mTLS-enforcing installations each get their own binding.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: vault-auth-delegator
+  name: vault-auth-delegator-{{NAMESPACE}}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -9,4 +14,4 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: vault
-    namespace: vault
+    namespace: {{NAMESPACE}}

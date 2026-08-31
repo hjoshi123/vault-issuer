@@ -24,11 +24,12 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/onsi/ginkgo/v2"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
+
+	"github.com/cert-manager/vault-issuer/test/e2e/framework/log"
 )
 
 type proxy struct {
@@ -130,7 +131,7 @@ func (p *proxy) start() error {
 				doneCh <- err
 				return
 			default:
-				fmt.Fprintf(ginkgo.GinkgoWriter, "error while forwarding port: %v\n", err)
+				log.Logf("error while forwarding port: %v", err)
 			}
 		}
 	}()
@@ -158,4 +159,24 @@ func (p *proxy) stop(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// StartProxy port-forwards to the Vault pod and returns the URL the test
+// process can reach it on, along with a function that tears the forward down.
+//
+// cert-manager's addon owned this as part of its Helm lifecycle. Here Vault is
+// installed by make, so only the forward is left.
+func StartProxy(
+	ctx context.Context,
+	clientset kubernetes.Interface,
+	kubeConfig *rest.Config,
+	podNamespace, podName string,
+) (url string, stop func(context.Context) error, _ error) {
+	p := newProxy(ctx, clientset, kubeConfig, podNamespace, podName)
+
+	if err := p.start(); err != nil {
+		return "", nil, err
+	}
+
+	return fmt.Sprintf("https://127.0.0.1:%d", p.listenPort), p.stop, nil
 }

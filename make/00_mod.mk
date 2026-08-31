@@ -32,6 +32,23 @@ deploy_namespace := cert-manager
 
 golangci_lint_config := .golangci.yaml
 
+# The Helm chart. There are no CRDs to generate: this issuer serves
+# cert-manager's own Issuer and ClusterIssuer resources.
+helm_chart_source_dir := deploy/charts/vault-issuer
+helm_chart_image_name := quay.io/jetstack/charts/vault-issuer
+helm_chart_version := $(VERSION)
+helm_dont_include_crds := true
+helm_labels_template_name := vault-issuer.labels
+
+# Point the chart's default image at the one that was just built, so that
+# `make install` and the end-to-end tests deploy this working tree.
+define helm_values_mutation_function
+$(YQ) \
+	--inplace \
+	'.image.repository = "$(oci_controller_image_name_development)" | .image.tag = "$(oci_controller_image_tag)"' \
+	$(1)
+endef
+
 # The Vault server used by the end-to-end tests. Preloaded into the kind cluster
 # so that the Helm install works without pulling from the internet.
 #
