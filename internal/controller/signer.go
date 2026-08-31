@@ -47,6 +47,9 @@ const FieldOwner = "vault.cert-manager.io"
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=serviceaccounts/token,verbs=create
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// issuer-lib records events through k8s.io/client-go/tools/events, which writes
+// to events.k8s.io/v1 rather than the legacy core API.
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Signer implements the issuer-lib Check and Sign functions for Vault-backed
 // cert-manager Issuers and ClusterIssuers.
@@ -95,9 +98,18 @@ func (s *Signer) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
 
 		// Preserves the in-tree behaviour of populating the CertificateRequest's
 		// status.ca (and therefore the Secret's ca.crt).
+		//nolint:staticcheck // Deliberate: the in-tree Vault issuer populated
+		// status.ca, so leaving this off would silently empty ca.crt in every
+		// Secret on the next renewal.
 		SetCAOnCertificateRequest: true,
 
 		EventRecorder: mgr.GetEventRecorder(FieldOwner),
+
+		// issuer-lib only watches the Issuer itself, so a successful Check
+		// latches the Issuer at Ready until its .spec changes. Watching the
+		// Secrets it references makes credential and CA-bundle rotation
+		// re-run Check.
+		PreSetupWithManager: s.preSetupWithManager,
 	}).SetupWithManager(ctx, mgr)
 }
 

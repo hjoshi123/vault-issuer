@@ -1,0 +1,30 @@
+suite: controller deployment
+templates:
+  - deployment.yaml
+tests:
+  - it: passes the cluster resource namespace, defaulting to the release namespace
+    release:
+      name: vault-issuer
+      namespace: cert-manager
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --cluster-resource-namespace=cert-manager
+
+  - it: keeps ambient credentials off for namespaced Issuers by default
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --issuer-ambient-credentials=false
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --cluster-issuer-ambient-credentials=true
+
+  - it: prefers the image digest over the tag
+    set:
+      image.digest: sha256:0e072dddd1f7f8fc8909a2ca6f65e76c5f0d2fcfb8be47935ae3457e8bbceb20
+      image.repository: quay.io/jetstack/vault-issuer
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: quay.io/jetstack/vault-issuer@sha256:0e072dddd1f7f8fc8909a2ca6f65e76c5f0d2fcfb8be47935ae3457e8bbceb20

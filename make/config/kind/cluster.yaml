@@ -14,5 +14,5 @@ kubeadmConfigPatches:
 nodes:
   - role: control-plane
     extraMounts:
-      - hostPath: {? {KIND_IMAGES: ""} : ""}
+      - hostPath: "{{KIND_IMAGES}}"
         containerPath: /mounted_images

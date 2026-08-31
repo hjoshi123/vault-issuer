@@ -1,0 +1,144 @@
+# +docs:section=Global
+
+# Number of replicas of the controller to run.
+#
+# Leader election is enabled, so only one replica reconciles at a time; the
+# others stand by.
+replicaCount: 1
+
+image:
+  # The container registry and repository to pull the controller image from.
+  # +docs:property
+  repository: quay.io/jetstack/vault-issuer
+
+  # Override the image tag. Defaults to the chart's appVersion.
+  # +docs:property
+  # tag: v0.1.0
+
+  # Pull the image by digest instead of by tag.
+  # +docs:property
+  # digest: sha256:0e072dddd1f7f8fc8909a2ca6f65e76c5f0d2fcfb8be47935ae3457e8bbceb20
+
+  # Image pull policy.
+  pullPolicy: IfNotPresent
+
+# Secrets used to pull the controller image from a private registry.
+# For example:
+#  imagePullSecrets:
+#    - name: my-registry-credentials
+imagePullSecrets: []
+
+# Override the name of the resources this chart creates.
+nameOverride: ""
+
+# Override the fully qualified name of the resources this chart creates.
+fullnameOverride: ""
+
+# +docs:section=Controller
+
+# The namespace Secrets referenced by a ClusterIssuer are read from.
+#
+# Namespaced Issuers always read their Secrets from their own namespace. This
+# setting only applies to cluster-scoped Issuers, which have no namespace of
+# their own. Defaults to the namespace the chart is installed into.
+# +docs:property
+clusterResourceNamespace: ""
+
+# Allow namespaced Issuers to authenticate with credentials drawn from the
+# controller's environment, such as instance metadata or IRSA, rather than from
+# the Issuer's spec.
+#
+# This is off by default: anyone who can create an Issuer in any namespace could
+# otherwise borrow the controller's cloud identity.
+issuerAmbientCredentials: false
+
+# Allow ClusterIssuers to authenticate with credentials drawn from the
+# controller's environment. ClusterIssuers are cluster-scoped and therefore
+# managed by cluster administrators, so this is on by default.
+clusterIssuerAmbientCredentials: true
+
+# How long a CertificateRequest is retried after a transient signing error,
+# measured from when the request was created. Once exceeded, the request fails
+# and cert-manager creates a new one.
+maxRetryDuration: 2m
+
+# Extra command line arguments passed to the controller.
+extraArgs: []
+
+# Log format, either "text" or "json".
+logFormat: text
+
+# Log verbosity, from 1 to 5.
+logLevel: 1
+
+# Port the controller serves its liveness and readiness probes on.
+readinessProbePort: 6060
+
+leaderElection:
+  # Elect a single active controller when more than one replica runs.
+  enabled: true
+
+  # How long a lease is held before another replica may take over.
+  leaseDuration: 15s
+
+  # How long the holder retries renewing its lease before giving it up.
+  renewDeadline: 10s
+
+# +docs:section=Deployment
+
+serviceAccount:
+  # Create a ServiceAccount for the controller.
+  create: true
+
+  # Name of the ServiceAccount. Generated from the chart name when empty.
+  # +docs:property
+  name: ""
+
+  # Annotations to add to the ServiceAccount, for example to bind a cloud
+  # identity to it.
+  annotations: {}
+
+  # Mount the ServiceAccount's API token into the controller Pod. Required: the
+  # controller talks to the Kubernetes API.
+  automountServiceAccountToken: true
+
+# Resource requests and limits for the controller.
+# For example:
+#  resources:
+#    requests:
+#      cpu: 10m
+#      memory: 32Mi
+resources: {}
+
+# Pod security context.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container security context.
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+# Node selector for the controller Pod.
+#
+# The default keeps Pods off Windows nodes in a mixed-OS cluster.
+# +docs:property
+nodeSelector:
+  kubernetes.io/os: linux
+
+# Tolerations for the controller Pod.
+tolerations: []
+
+# Affinity rules for the controller Pod.
+affinity: {}
+
+# Annotations to add to the controller Pod.
+podAnnotations: {}
+
+# Labels to add to the controller Pod.
+podLabels: {}

@@ -1,0 +1,357 @@
+{
+  "$defs": {
+    "helm-values": {
+      "additionalProperties": false,
+      "properties": {
+        "affinity": {
+          "$ref": "#/$defs/helm-values.affinity"
+        },
+        "clusterIssuerAmbientCredentials": {
+          "$ref": "#/$defs/helm-values.clusterIssuerAmbientCredentials"
+        },
+        "clusterResourceNamespace": {
+          "$ref": "#/$defs/helm-values.clusterResourceNamespace"
+        },
+        "extraArgs": {
+          "$ref": "#/$defs/helm-values.extraArgs"
+        },
+        "fullnameOverride": {
+          "$ref": "#/$defs/helm-values.fullnameOverride"
+        },
+        "global": {
+          "$ref": "#/$defs/helm-values.global"
+        },
+        "image": {
+          "$ref": "#/$defs/helm-values.image"
+        },
+        "imagePullSecrets": {
+          "$ref": "#/$defs/helm-values.imagePullSecrets"
+        },
+        "issuerAmbientCredentials": {
+          "$ref": "#/$defs/helm-values.issuerAmbientCredentials"
+        },
+        "leaderElection": {
+          "$ref": "#/$defs/helm-values.leaderElection"
+        },
+        "logFormat": {
+          "$ref": "#/$defs/helm-values.logFormat"
+        },
+        "logLevel": {
+          "$ref": "#/$defs/helm-values.logLevel"
+        },
+        "maxRetryDuration": {
+          "$ref": "#/$defs/helm-values.maxRetryDuration"
+        },
+        "nameOverride": {
+          "$ref": "#/$defs/helm-values.nameOverride"
+        },
+        "nodeSelector": {
+          "$ref": "#/$defs/helm-values.nodeSelector"
+        },
+        "podAnnotations": {
+          "$ref": "#/$defs/helm-values.podAnnotations"
+        },
+        "podLabels": {
+          "$ref": "#/$defs/helm-values.podLabels"
+        },
+        "podSecurityContext": {
+          "$ref": "#/$defs/helm-values.podSecurityContext"
+        },
+        "readinessProbePort": {
+          "$ref": "#/$defs/helm-values.readinessProbePort"
+        },
+        "replicaCount": {
+          "$ref": "#/$defs/helm-values.replicaCount"
+        },
+        "resources": {
+          "$ref": "#/$defs/helm-values.resources"
+        },
+        "securityContext": {
+          "$ref": "#/$defs/helm-values.securityContext"
+        },
+        "serviceAccount": {
+          "$ref": "#/$defs/helm-values.serviceAccount"
+        },
+        "tolerations": {
+          "$ref": "#/$defs/helm-values.tolerations"
+        }
+      },
+      "type": "object"
+    },
+    "helm-values.affinity": {
+      "default": {},
+      "description": "Affinity rules for the controller Pod.",
+      "type": "object"
+    },
+    "helm-values.clusterIssuerAmbientCredentials": {
+      "default": true,
+      "description": "Allow ClusterIssuers to authenticate with credentials drawn from the controller's environment. ClusterIssuers are cluster-scoped and therefore managed by cluster administrators, so this is on by default.",
+      "type": "boolean"
+    },
+    "helm-values.clusterResourceNamespace": {
+      "default": "",
+      "description": "The namespace Secrets referenced by a ClusterIssuer are read from.\n\nNamespaced Issuers always read their Secrets from their own namespace. This setting only applies to cluster-scoped Issuers, which have no namespace of their own. Defaults to the namespace the chart is installed into.",
+      "type": "string"
+    },
+    "helm-values.extraArgs": {
+      "default": [],
+      "description": "Extra command line arguments passed to the controller.",
+      "items": {},
+      "type": "array"
+    },
+    "helm-values.fullnameOverride": {
+      "default": "",
+      "description": "Override the fully qualified name of the resources this chart creates.",
+      "type": "string"
+    },
+    "helm-values.global": {
+      "description": "Global values shared across all (sub)charts"
+    },
+    "helm-values.image": {
+      "additionalProperties": false,
+      "properties": {
+        "digest": {
+          "$ref": "#/$defs/helm-values.image.digest"
+        },
+        "pullPolicy": {
+          "$ref": "#/$defs/helm-values.image.pullPolicy"
+        },
+        "repository": {
+          "$ref": "#/$defs/helm-values.image.repository"
+        },
+        "tag": {
+          "$ref": "#/$defs/helm-values.image.tag"
+        }
+      },
+      "type": "object"
+    },
+    "helm-values.image.digest": {
+      "description": "Pull the image by digest instead of by tag.",
+      "type": "string"
+    },
+    "helm-values.image.pullPolicy": {
+      "default": "IfNotPresent",
+      "description": "Image pull policy.",
+      "type": "string"
+    },
+    "helm-values.image.repository": {
+      "default": "quay.io/jetstack/vault-issuer",
+      "description": "The container registry and repository to pull the controller image from.",
+      "type": "string"
+    },
+    "helm-values.image.tag": {
+      "description": "Override the image tag. Defaults to the chart's appVersion.",
+      "type": "string"
+    },
+    "helm-values.imagePullSecrets": {
+      "default": [],
+      "description": "Secrets used to pull the controller image from a private registry.\nFor example:\nimagePullSecrets:\n  - name: my-registry-credentials",
+      "items": {},
+      "type": "array"
+    },
+    "helm-values.issuerAmbientCredentials": {
+      "default": false,
+      "description": "Allow namespaced Issuers to authenticate with credentials drawn from the controller's environment, such as instance metadata or IRSA, rather than from the Issuer's spec.\n\nThis is off by default: anyone who can create an Issuer in any namespace could otherwise borrow the controller's cloud identity.",
+      "type": "boolean"
+    },
+    "helm-values.leaderElection": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "$ref": "#/$defs/helm-values.leaderElection.enabled"
+        },
+        "leaseDuration": {
+          "$ref": "#/$defs/helm-values.leaderElection.leaseDuration"
+        },
+        "renewDeadline": {
+          "$ref": "#/$defs/helm-values.leaderElection.renewDeadline"
+        }
+      },
+      "type": "object"
+    },
+    "helm-values.leaderElection.enabled": {
+      "default": true,
+      "description": "Elect a single active controller when more than one replica runs.",
+      "type": "boolean"
+    },
+    "helm-values.leaderElection.leaseDuration": {
+      "default": "15s",
+      "description": "How long a lease is held before another replica may take over.",
+      "type": "string"
+    },
+    "helm-values.leaderElection.renewDeadline": {
+      "default": "10s",
+      "description": "How long the holder retries renewing its lease before giving it up.",
+      "type": "string"
+    },
+    "helm-values.logFormat": {
+      "default": "text",
+      "description": "Log format, either \"text\" or \"json\".",
+      "type": "string"
+    },
+    "helm-values.logLevel": {
+      "default": 1,
+      "description": "Log verbosity, from 1 to 5.",
+      "type": "number"
+    },
+    "helm-values.maxRetryDuration": {
+      "default": "2m",
+      "description": "How long a CertificateRequest is retried after a transient signing error, measured from when the request was created. Once exceeded, the request fails and cert-manager creates a new one.",
+      "type": "string"
+    },
+    "helm-values.nameOverride": {
+      "default": "",
+      "description": "Override the name of the resources this chart creates.",
+      "type": "string"
+    },
+    "helm-values.nodeSelector": {
+      "default": {
+        "kubernetes.io/os": "linux"
+      },
+      "description": "Node selector for the controller Pod.\n\nThe default keeps Pods off Windows nodes in a mixed-OS cluster.",
+      "type": "object"
+    },
+    "helm-values.podAnnotations": {
+      "default": {},
+      "description": "Annotations to add to the controller Pod.",
+      "type": "object"
+    },
+    "helm-values.podLabels": {
+      "default": {},
+      "description": "Labels to add to the controller Pod.",
+      "type": "object"
+    },
+    "helm-values.podSecurityContext": {
+      "additionalProperties": false,
+      "properties": {
+        "runAsNonRoot": {
+          "$ref": "#/$defs/helm-values.podSecurityContext.runAsNonRoot"
+        },
+        "seccompProfile": {
+          "$ref": "#/$defs/helm-values.podSecurityContext.seccompProfile"
+        }
+      },
+      "type": "object"
+    },
+    "helm-values.podSecurityContext.runAsNonRoot": {
+      "default": true,
+      "type": "boolean"
+    },
+    "helm-values.podSecurityContext.seccompProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/helm-values.podSecurityContext.seccompProfile.type"
+        }
+      },
+      "type": "object"
+    },
+    "helm-values.podSecurityContext.seccompProfile.type": {
+      "default": "RuntimeDefault",
+      "type": "string"
+    },
+    "helm-values.readinessProbePort": {
+      "default": 6060,
+      "description": "Port the controller serves its liveness and readiness probes on.",
+      "type": "number"
+    },
+    "helm-values.replicaCount": {
+      "default": 1,
+      "description": "Number of replicas of the controller to run.\n\nLeader election is enabled, so only one replica reconciles at a time; the others stand by.",
+      "type": "number"
+    },
+    "helm-values.resources": {
+      "default": {},
+      "description": "Resource requests and limits for the controller.\nFor example:\nresources:\n  requests:\n    cpu: 10m\n    memory: 32Mi",
+      "type": "object"
+    },
+    "helm-values.securityContext": {
+      "additionalProperties": false,
+      "properties": {
+        "allowPrivilegeEscalation": {
+          "$ref": "#/$defs/helm-values.securityContext.allowPrivilegeEscalation"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/helm-values.securityContext.capabilities"
+        },
+        "readOnlyRootFilesystem": {
+          "$ref": "#/$defs/helm-values.securityContext.readOnlyRootFilesystem"
+        }
+      },
+      "type": "object"
+    },
+    "helm-values.securityContext.allowPrivilegeEscalation": {
+      "default": false,
+      "type": "boolean"
+    },
+    "helm-values.securityContext.capabilities": {
+      "additionalProperties": false,
+      "properties": {
+        "drop": {
+          "$ref": "#/$defs/helm-values.securityContext.capabilities.drop"
+        }
+      },
+      "type": "object"
+    },
+    "helm-values.securityContext.capabilities.drop": {
+      "items": {
+        "$ref": "#/$defs/helm-values.securityContext.capabilities.drop[0]"
+      },
+      "type": "array"
+    },
+    "helm-values.securityContext.capabilities.drop[0]": {
+      "default": "ALL",
+      "type": "string"
+    },
+    "helm-values.securityContext.readOnlyRootFilesystem": {
+      "default": true,
+      "type": "boolean"
+    },
+    "helm-values.serviceAccount": {
+      "additionalProperties": false,
+      "properties": {
+        "annotations": {
+          "$ref": "#/$defs/helm-values.serviceAccount.annotations"
+        },
+        "automountServiceAccountToken": {
+          "$ref": "#/$defs/helm-values.serviceAccount.automountServiceAccountToken"
+        },
+        "create": {
+          "$ref": "#/$defs/helm-values.serviceAccount.create"
+        },
+        "name": {
+          "$ref": "#/$defs/helm-values.serviceAccount.name"
+        }
+      },
+      "type": "object"
+    },
+    "helm-values.serviceAccount.annotations": {
+      "default": {},
+      "description": "Annotations to add to the ServiceAccount, for example to bind a cloud identity to it.",
+      "type": "object"
+    },
+    "helm-values.serviceAccount.automountServiceAccountToken": {
+      "default": true,
+      "description": "Mount the ServiceAccount's API token into the controller Pod. Required: the controller talks to the Kubernetes API.",
+      "type": "boolean"
+    },
+    "helm-values.serviceAccount.create": {
+      "default": true,
+      "description": "Create a ServiceAccount for the controller.",
+      "type": "boolean"
+    },
+    "helm-values.serviceAccount.name": {
+      "default": "",
+      "description": "Name of the ServiceAccount. Generated from the chart name when empty.",
+      "type": "string"
+    },
+    "helm-values.tolerations": {
+      "default": [],
+      "description": "Tolerations for the controller Pod.",
+      "items": {},
+      "type": "array"
+    }
+  },
+  "$ref": "#/$defs/helm-values",
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

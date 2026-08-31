@@ -370,7 +370,9 @@ func (v *Vault) clientCertificate(ctx context.Context) (*tls.Certificate, error)
 	refCert := v.issuer.GetSpec().Vault.ClientCertSecretRef
 	refPrivateKey := v.issuer.GetSpec().Vault.ClientKeySecretRef
 	if refCert == nil || refPrivateKey == nil {
-		return nil, nil
+		// No client certificate configured: the caller uses a TLS config
+		// without one, which is not an error.
+		return nil, nil //nolint:nilnil
 	}
 
 	secretCert := &corev1.Secret{}

@@ -26,10 +26,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
 
-	"github.com/cert-manager/cert-manager/e2e-tests/framework"
-	"github.com/cert-manager/cert-manager/e2e-tests/framework/addon"
-	vaultaddon "github.com/cert-manager/cert-manager/e2e-tests/framework/addon/vault"
-	e2eutil "github.com/cert-manager/cert-manager/e2e-tests/util"
+	"github.com/cert-manager/vault-issuer/test/e2e/framework"
+	"github.com/cert-manager/vault-issuer/test/e2e/framework/addon"
+	vaultaddon "github.com/cert-manager/vault-issuer/test/e2e/framework/addon/vault"
+	e2eutil "github.com/cert-manager/vault-issuer/test/e2e/util"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
